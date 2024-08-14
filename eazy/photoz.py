@@ -1750,7 +1750,8 @@ class PhotoZ(object):
             self.ZPHOT_USER = True # user *did* specify zbest
                     
         if ((self.param['FIX_ZSPEC'] in utils.TRUE_VALUES) & 
-            ('z_spec' in self.cat.colnames)):
+            (('z_spec' in self.cat.colnames) | 
+             ('z_spec' in self.translate.trans.values()))):
             has_zsp = self.ZSPEC > self.zgrid[0]
             self.zbest[has_zsp] = self.ZSPEC[has_zsp]
             self.ZPHOT_AT_ZSPEC = True
