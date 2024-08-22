@@ -279,6 +279,10 @@ class PhotoZ(object):
                     resample_wave=self.param['RESAMPLE_WAVE'])
                           
         self.templates = templates_module.read_templates_file(**kws)
+
+        ### YY: Update MIN_VALID_FILTERS
+        global MIN_VALID_FILTERS
+        MIN_VALID_FILTERS = self.param['N_MIN_COLORS']
         
         ### Set redshift fit grid
         self.set_zgrid()
@@ -1493,6 +1497,58 @@ class PhotoZ(object):
         
         return ampl, chi2, logpz
 
+    def fit_single_templates_vectorized(self, verbose=True):
+        """
+        Fit individual templates on the redshift grid
+        ## YY: vectorized version
+        ##     but this module use only 1 proc, why?
+        ##     this function is memory-limited, use multiprocessing to speed up!
+        """
+    
+        ampl = np.zeros((self.NTEMP, self.NOBJ, self.NZ), 
+                        dtype=self.ARRAY_DTYPE)
+        chi2 = np.zeros((self.NTEMP, self.NOBJ, self.NZ),
+                        dtype=self.ARRAY_DTYPE)
+    
+        # Initialize the arrays
+        # tempfilt = self.tempfilt.tempfilt
+        zgrid = self.zgrid
+    
+        # Transpose the template filter array
+        templ = self.tempfilt.tempfilt.transpose(1, 2, 0)  # (NTEMP, NFILT, NZ)
+    
+        # Loop over redshifts
+        for iz in range(self.NZ):
+            tefz = self.TEF(self.zgrid[iz])
+    
+            # Compute full error for the observations
+            full_err = np.sqrt(self.efnu**2 + (self.fnu * tefz)**2)
+    
+            # Compute numerator and denominator for all templates at once
+            # num, den: [NOBJ, NTEMP]
+            num = np.einsum('of,tf->ot', (self.fnu/self.zp / full_err * self.ok_data), templ[:, :, iz])
+            den = np.einsum('of,tf->ot', (              1. / full_err * self.ok_data), templ[:, :, iz]**2)
+    
+            # Compute amplitudes for all templates and objects at once
+            ampl[:, :, iz] = (num / den).T  # [NTEMP, NOBJ, iz]
+    
+            # Compute model flux for all templates and objects
+            mz = ampl[:, :, iz][:,:,None] * templ[:, :, iz][:,None,:]
+            chi = ((mz - self.fnu[None, :, :]/self.zp) * self.ok_data[None, :, :])**2 / full_err[None, :, :]**2
+            chi2[:, :, iz] = chi.sum(axis=2)  # Transpose to match the shape
+    
+        chimin = chi2.min(axis=2).min(axis=0)
+        if verbose:
+            print('Compute p(z|T)')
+    
+        logpz = -(chi2 - chimin[None,:,None])/2
+    
+        pzt = np.exp(logpz).sum(axis=0)
+        pznorm = np.trapz(pzt, self.zgrid, axis=1)
+        logpz -= np.log(pznorm[None,:,None])
+    
+        return ampl, chi2, logpz
+    
 
     def fit_parallel(self, *args, **kwargs):
         """
@@ -2648,9 +2704,21 @@ class PhotoZ(object):
         ## Evaluate coeffs at specified redshift
         tef_i = self.TEF(z)
         A = np.squeeze(self.tempfilt(z))
-        chi2_i, coeffs_i, fmodel, draws = template_lsq(fnu_i, efnu_i, A, 
-                                                   tef_i, self.zp, 
-                                                   ndraws, fitter)
+
+        ## YY: add TEMPLATE_COMBOS=1 (fit_single_template)
+        ##     in this case, do not repeat the fitting with `fitter`, 
+        ##     just use the pre-determined values
+        if self.param.params['TEMPLATE_COMBOS'] in [1, '1']:
+            chi2_i = self.chi2_fit[ix,:]
+            iz = np.argmin(chi2_i)
+            coeffs_i = self.fit_coeffs[:,ix,iz]
+            fmodel = np.dot(coeffs_i, A)
+            draws = None
+        else:
+            chi2_i, coeffs_i, fmodel, draws = template_lsq(fnu_i, efnu_i, A, 
+                                                           tef_i, self.zp, 
+                                                           ndraws, fitter)
+
         if draws is None:
             efmodel = 0
         else:
@@ -3646,8 +3714,10 @@ class PhotoZ(object):
         
         zbest = self.zgrid[izmax]
         lnpmax = np.zeros_like(zbest)
-        
-        zbest[izmax == 0] = -1
+
+        # YY: still use the boundary Z_MIN!
+	# with this, there will be too many zbest = -1 (i.e., fitting fails)
+        # zbest[izmax == 0] = -1
         
         mask = (izmax > 0) & (izmax < self.NZ-1) & has_chi2
         
@@ -5972,7 +6042,8 @@ def template_lsq(fnu_i, efnu_i, A, TEFz, zp, ndraws, fitter):
     from scipy.optimize import nnls
     import scipy.optimize
     
-    global MIN_VALID_FILTERS
+    ### YY: unset global variable
+    ### global MIN_VALID_FILTERS
     global BOUNDED_DEFAULTS
     
     sh = A.shape
