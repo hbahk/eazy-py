@@ -1799,7 +1799,7 @@ class PhotoZ(object):
                 self.evaluate_zml(prior=prior, beta_prior=beta_prior)
 
             self.ZPHOT_USER = False # user did *not* specify zbest
-            self.zbest = self.zml
+            self.zbest = self.zml.copy()
                             
         else:
             self.zbest = zbest
